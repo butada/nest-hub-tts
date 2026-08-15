@@ -1,0 +1,13 @@
+services:
+  nest-hub-tts:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MEDIA_DIR: /data/media
+      MEDIA_PUBLIC_BASE_URL: http://192.168.50.7:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/media:/data/media

@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import asyncio
+import hmac
+import logging
+import uuid
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from .cast import CastController, CastFailure
+from .config import get_settings
+from .media import MediaNotFoundError, MediaSignatureError, MediaStore
+from .models import DeviceResponse, SpeakRequest, SpeakResponse
+from .tts import GeminiTTS, TTSFailure
+
+logger = logging.getLogger("nest_hub_tts")
+settings = get_settings()
+media_store = MediaStore(
+    settings.media_dir,
+    settings.media_public_base_url,
+    settings.media_ttl_seconds,
+    settings.media_signing_secret,
+)
+tts = GeminiTTS(settings)
+cast_controller = CastController(settings)
+bearer = HTTPBearer(auto_error=False)
+
+
+async def _cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        removed = media_store.cleanup()
+        if removed:
+            logger.info("removed_expired_media count=%s", removed)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    cleanup_task = asyncio.create_task(_cleanup_loop())
+    yield
+    cleanup_task.cancel()
+    await tts.close()
+    await cast_controller.close()
+    media_store.cleanup()
+
+
+app = FastAPI(title="Nest Hub TTS", version="0.1.0", lifespan=lifespan)
+
+
+async def require_auth(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),  # noqa: B008
+) -> None:
+    if not settings.api_token:
+        return
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Bearer token required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not hmac.compare_digest(credentials.credentials, settings.api_token):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/v1/devices", response_model=list[DeviceResponse], dependencies=[Depends(require_auth)])
+async def devices() -> list[DeviceResponse]:
+    return [
+        DeviceResponse(
+            id=device_id,
+            name=device.name,
+            host=device.host,
+            model=device.model,
+        )
+        for device_id, device in settings.cast_devices.items()
+    ]
+
+
+@app.get("/media/{media_id}.mp3")
+async def media(
+    media_id: str,
+    expires: int = Query(..., ge=0),
+    sig: str = Query(..., min_length=1),
+) -> Response:
+    try:
+        path = media_store.resolve(media_id, expires, sig)
+    except MediaSignatureError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except MediaNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Media not found") from exc
+    return FileResponse(path, media_type="audio/mpeg", filename=f"{media_id}.mp3")
+
+
+@app.post(
+    "/v1/speak",
+    response_model=SpeakResponse,
+    dependencies=[Depends(require_auth)],
+)
+async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
+    request_id = uuid.uuid4().hex
+    device = settings.cast_devices.get(payload.device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail=f"Unknown device_id: {payload.device_id}")
+    if len(payload.text) > settings.max_text_length:
+        raise HTTPException(
+            status_code=413,
+            detail=f"text exceeds MAX_TEXT_LENGTH ({settings.max_text_length})",
+        )
+
+    media_store.cleanup()
+    try:
+        generated = await tts.synthesize(
+            payload.text,
+            payload.voice or settings.gemini_tts_voice,
+            payload.style or settings.gemini_tts_style,
+        )
+        asset = media_store.save_mp3(generated.data)
+        media_url = media_store.signed_url(asset)
+        result = await cast_controller.play(
+            payload.device_id,
+            device,
+            media_url,
+            payload.title or "Nest Hub TTS",
+        )
+    except TTSFailure as exc:
+        logger.warning("tts_failed request_id=%s error=%s", request_id, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except CastFailure as exc:
+        logger.warning("cast_failed request_id=%s error=%s", request_id, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    logger.info(
+        "speak_succeeded request_id=%s device_id=%s status=%s client=%s",
+        request_id,
+        payload.device_id,
+        result.status,
+        request.client.host if request.client else "unknown",
+    )
+    return SpeakResponse(
+        request_id=request_id,
+        device_id=payload.device_id,
+        status=result.status,
+    )
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+    logger.exception("unexpected_error", exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
