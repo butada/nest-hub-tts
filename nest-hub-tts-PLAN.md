@@ -24,6 +24,8 @@ n8nには音声バイナリを返さず、音声生成・一時配信・Google C
 ### MVPに含めるもの
 
 - `POST /v1/speak`
+- `POST /v1/speak`の`execution=batch`による非同期実行
+- `GET /v1/jobs/{request_id}`によるBatchジョブ状態確認
 - JSONによるテキスト入力
 - `gemini-3.1-flash-tts-preview`によるTTS
 - TTS出力のMP3正規化
@@ -42,7 +44,7 @@ n8nには音声バイナリを返さず、音声生成・一時配信・Google C
 - n8nからのバイナリMP3入力
 - 外部MP3 URLの取得
 - 複数リクエストのキュー制御・排他制御
-- ジョブDB・非同期ジョブAPI
+- 複数テキストを1つのBatchジョブへまとめる一括入力API
 - 複数Nest Hubへの同期再生
 - Google Assistantへの直接発話
 - mDNS探索への依存
@@ -78,6 +80,12 @@ n8nには音声バイナリを返さず、音声生成・一時配信・Google C
   "title": "お知らせ"
 }
 ```
+
+`execution`は`realtime`（デフォルト）または`batch`を指定する。`batch`の場合はHTTP 202で受付結果を返し、サービスがバックグラウンドでGemini Batch APIの完了を監視する。完了後は通常経路と同じMP3化・Nest Hub再生を行う。
+
+### `GET /v1/jobs/{request_id}`
+
+Batch実行の状態を返す。`submitted`、`running`、`succeeded`、`failed`を持つ。ジョブ情報はSQLiteに保存し、再起動後に未完了ジョブの監視を再開する。
 
 成功時は、TTS生成とCastへの再生要求が完了した時点で同期レスポンスを返す。
 
@@ -119,4 +127,3 @@ n8nには音声バイナリを返さず、音声生成・一時配信・Google C
 - 未登録デバイスを明確なエラーにできる
 - Gemini失敗、Cast失敗、MP3配信失敗を区別できる
 - 一時MP3がTTL経過後に削除される
-

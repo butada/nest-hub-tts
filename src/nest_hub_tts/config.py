@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     gemini_tts_voice: str = "Kore"
     gemini_tts_style: str = "自然で聞き取りやすく、与えられたテキストを内容を変えずに読み上げる"
     gemini_timeout_seconds: float = 60.0
+    gemini_batch_poll_interval_seconds: float = Field(default=10.0, ge=1.0)
     max_text_length: int = Field(default=4000, ge=1)
 
     api_token: str | None = None
@@ -39,6 +40,8 @@ class Settings(BaseSettings):
     media_dir: Path = Path("./data/media")
     media_ttl_seconds: int = Field(default=3600, ge=60)
     media_signing_secret: str = "dev-only-media-secret"
+
+    batch_db_path: Path = Path("./data/jobs.sqlite3")
 
     cast_devices_json: str = "{}"
     cast_timeout_seconds: float = Field(default=10.0, ge=1.0)

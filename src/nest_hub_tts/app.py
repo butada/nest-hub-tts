@@ -10,11 +10,12 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .batch import BatchJobStore, BatchRunner, batch_response_to_dict
 from .cast import CastController, CastFailure
 from .config import get_settings
 from .media import MediaNotFoundError, MediaSignatureError, MediaStore
-from .models import DeviceResponse, SpeakRequest, SpeakResponse
-from .tts import GeminiTTS, TTSFailure
+from .models import BatchJobResponse, DeviceResponse, SpeakRequest, SpeakResponse
+from .tts import BatchFailure, GeminiTTS, TTSFailure
 
 logger = logging.getLogger("nest_hub_tts")
 settings = get_settings()
@@ -26,6 +27,8 @@ media_store = MediaStore(
 )
 tts = GeminiTTS(settings)
 cast_controller = CastController(settings)
+batch_store = BatchJobStore(settings.batch_db_path)
+batch_runner = BatchRunner(settings, tts, media_store, cast_controller, batch_store)
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -40,8 +43,10 @@ async def _cleanup_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     cleanup_task = asyncio.create_task(_cleanup_loop())
+    await batch_runner.start()
     yield
     cleanup_task.cancel()
+    await batch_runner.close()
     await tts.close()
     await cast_controller.close()
     media_store.cleanup()
@@ -83,6 +88,18 @@ async def devices() -> list[DeviceResponse]:
     ]
 
 
+@app.get(
+    "/v1/jobs/{request_id}",
+    response_model=BatchJobResponse,
+    dependencies=[Depends(require_auth)],
+)
+async def job_status(request_id: str) -> BatchJobResponse:
+    row = batch_store.get(request_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}")
+    return BatchJobResponse(**batch_response_to_dict(row))
+
+
 @app.get("/media/{media_id}.mp3")
 async def media(
     media_id: str,
@@ -113,6 +130,37 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
             status_code=413,
             detail=f"text exceeds MAX_TEXT_LENGTH ({settings.max_text_length})",
         )
+
+    if payload.execution == "batch":
+        try:
+            batch_name = await batch_runner.submit(
+                request_id,
+                payload.device_id,
+                device,
+                payload.text,
+                payload.voice or settings.gemini_tts_voice,
+                payload.style or settings.gemini_tts_style,
+                payload.title or "Nest Hub TTS",
+            )
+        except (BatchFailure, TTSFailure) as exc:
+            logger.warning("batch_submit_failed request_id=%s error=%s", request_id, exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        logger.info(
+            "batch_submitted request_id=%s batch_name=%s device_id=%s client=%s",
+            request_id,
+            batch_name,
+            payload.device_id,
+            request.client.host if request.client else "unknown",
+        )
+        response = SpeakResponse(
+            request_id=request_id,
+            device_id=payload.device_id,
+            execution="batch",
+            status="batch_submitted",
+            batch_name=batch_name,
+        )
+        return JSONResponse(status_code=202, content=response.model_dump())  # type: ignore[return-value]
 
     media_store.cleanup()
     try:
@@ -146,6 +194,7 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
     return SpeakResponse(
         request_id=request_id,
         device_id=payload.device_id,
+        execution="realtime",
         status=result.status,
     )
 

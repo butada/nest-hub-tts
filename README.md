@@ -36,6 +36,8 @@ uv run nest-hub-tts
 
 ### `POST /v1/speak`
 
+`execution`を省略すると、これまでどおりTTS生成からNest Hub再生まで完了してからレスポンスを返します。
+
 ```sh
 curl -X POST http://127.0.0.1:8080/v1/speak \
   -H 'Authorization: Bearer replace-with-a-long-random-token' \
@@ -43,6 +45,7 @@ curl -X POST http://127.0.0.1:8080/v1/speak \
   -d '{
     "text": "お知らせです。テスト発話を開始します。",
     "device_id": "living-room",
+    "execution": "realtime",
     "voice": "Kore",
     "style": "自然で聞き取りやすく話す",
     "title": "テスト発話"
@@ -50,6 +53,47 @@ curl -X POST http://127.0.0.1:8080/v1/speak \
 ```
 
 成功すると、Castへの再生要求が`playing`または`buffering`として返ります。
+
+#### Batch APIによる非同期実行
+
+`execution`に`batch`を指定すると、Gemini Batch APIへジョブを登録してHTTP 202を返します。サービスはバックグラウンドで完了を監視し、音声生成・MP3化・Nest Hub再生まで実行します。
+
+```sh
+curl -X POST http://127.0.0.1:8080/v1/speak \
+  -H 'Authorization: Bearer replace-with-a-long-random-token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "text": "あとで読み上げるお知らせです。",
+    "device_id": "living-room",
+    "execution": "batch",
+    "voice": "Kore",
+    "style": "自然で聞き取りやすく話す",
+    "title": "Batchのお知らせ"
+  }'
+```
+
+レスポンス例：
+
+```json
+{
+  "request_id": "...",
+  "device_id": "living-room",
+  "execution": "batch",
+  "status": "batch_submitted",
+  "batch_name": "batches/..."
+}
+```
+
+Batch APIは非同期で、完了時刻は保証されません。通常は数分以内に完了する場合がありますが、即時発話が必要な処理には`realtime`を使ってください。
+
+ジョブ状態は次で確認できます。
+
+```sh
+curl http://127.0.0.1:8080/v1/jobs/REQUEST_ID \
+  -H 'Authorization: Bearer replace-with-a-long-random-token'
+```
+
+状態は`submitted`、`running`、`succeeded`、`failed`のいずれかです。ジョブ状態は`BATCH_DB_PATH`で指定したSQLiteファイルに保存され、サービス再起動後も監視を再開します。
 
 ### `GET /v1/devices`
 
@@ -81,3 +125,4 @@ n8nからDocker内部で呼ぶ場合は、Composeサービス名が使える構�
 - `POST /v1/play`は提供しません。MP3は本体サービス内部で生成・配信します。
 - `MEDIA_PUBLIC_BASE_URL`はNest Hubから到達可能である必要があります。
 - `API_TOKEN`を空にすると認証なしになるため、LAN内の評価時以外は設定してください。
+- Batch APIの監視間隔は`GEMINI_BATCH_POLL_INTERVAL_SECONDS`で変更できます。
