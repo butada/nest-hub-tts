@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .audio_cache import AudioCache
 from .cast import CastController, CastFailure
 from .config import DeviceSettings, Settings
 from .media import MediaStore
@@ -22,6 +24,9 @@ class BatchJob:
     device_id: str
     device: DeviceSettings
     title: str
+    cache_key: dict[str, object] | None
+    audio_profile: str
+    audio_speed: float
 
 
 class BatchJobStore:
@@ -48,6 +53,10 @@ class BatchJobStore:
                     device_uuid TEXT,
                     device_model TEXT,
                     title TEXT NOT NULL,
+                    cache_key TEXT,
+                    audio_profile TEXT NOT NULL DEFAULT 'natural',
+                    audio_speed REAL NOT NULL DEFAULT 1.0,
+                    audio_id TEXT,
                     status TEXT NOT NULL,
                     error TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -55,6 +64,22 @@ class BatchJobStore:
                 )
                 """
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(batch_jobs)").fetchall()
+            }
+            if "cache_key" not in columns:
+                connection.execute("ALTER TABLE batch_jobs ADD COLUMN cache_key TEXT")
+            if "audio_profile" not in columns:
+                connection.execute(
+                    "ALTER TABLE batch_jobs ADD COLUMN audio_profile TEXT NOT NULL "
+                    "DEFAULT 'natural'"
+                )
+            if "audio_speed" not in columns:
+                connection.execute(
+                    "ALTER TABLE batch_jobs ADD COLUMN audio_speed REAL NOT NULL DEFAULT 1.0"
+                )
+            if "audio_id" not in columns:
+                connection.execute("ALTER TABLE batch_jobs ADD COLUMN audio_id TEXT")
 
     def create(self, job: BatchJob) -> None:
         with self._connect() as connection:
@@ -62,8 +87,9 @@ class BatchJobStore:
                 """
                 INSERT INTO batch_jobs (
                     request_id, batch_name, device_id, device_name, device_host,
-                    device_uuid, device_model, title, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'submitted')
+                    device_uuid, device_model, title, cache_key, audio_profile,
+                    audio_speed, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted')
                 """,
                 (
                     job.request_id,
@@ -74,18 +100,30 @@ class BatchJobStore:
                     job.device.uuid,
                     job.device.model,
                     job.title,
+                    json.dumps(job.cache_key, ensure_ascii=False, sort_keys=True)
+                    if job.cache_key is not None
+                    else None,
+                    job.audio_profile,
+                    job.audio_speed,
                 ),
             )
 
-    def update_status(self, request_id: str, status: str, error: str | None = None) -> None:
+    def update_status(
+        self,
+        request_id: str,
+        status: str,
+        error: str | None = None,
+        audio_id: str | None = None,
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE batch_jobs
-                SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
+                SET status = ?, error = ?, audio_id = COALESCE(?, audio_id),
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE request_id = ?
                 """,
-                (status, error, request_id),
+                (status, error, audio_id, request_id),
             )
 
     def get(self, request_id: str) -> sqlite3.Row | None:
@@ -116,6 +154,9 @@ def job_from_row(row: sqlite3.Row) -> BatchJob:
             model=row["device_model"],
         ),
         title=row["title"],
+        cache_key=json.loads(row["cache_key"]) if row["cache_key"] else None,
+        audio_profile=row["audio_profile"],
+        audio_speed=float(row["audio_speed"]),
     )
 
 
@@ -127,12 +168,14 @@ class BatchRunner:
         media_store: MediaStore,
         cast_controller: CastController,
         store: BatchJobStore,
+        audio_cache: AudioCache,
     ) -> None:
         self.settings = settings
         self.tts = tts
         self.media_store = media_store
         self.cast_controller = cast_controller
         self.store = store
+        self.audio_cache = audio_cache
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
@@ -156,6 +199,9 @@ class BatchRunner:
         voice: str,
         style: str,
         title: str,
+        cache_key: dict[str, object] | None,
+        audio_profile: str,
+        audio_speed: float,
     ) -> str:
         batch_name = await self.tts.submit_batch(request_id, text, voice, style)
         job = BatchJob(
@@ -164,6 +210,9 @@ class BatchRunner:
             device_id=device_id,
             device=device,
             title=title,
+            cache_key=cache_key,
+            audio_profile=audio_profile,
+            audio_speed=audio_speed,
         )
         self.store.create(job)
         self._start_task(job)
@@ -187,17 +236,27 @@ class BatchRunner:
                     error = self.tts.batch_error(batch) or f"Gemini Batch API state: {state}"
                     raise BatchFailure(error)
 
-                generated = self.tts.audio_from_batch(batch)
+                generated = self.tts.audio_from_batch(
+                    batch,
+                    audio_profile=job.audio_profile,
+                    audio_speed=job.audio_speed,
+                )
                 self.media_store.cleanup()
-                asset = self.media_store.save_mp3(generated.data)
-                media_url = self.media_store.signed_url(asset)
+                audio_id = None
+                if job.cache_key is not None:
+                    cached = self.audio_cache.save(job.cache_key, generated.data)
+                    media_url = self.audio_cache.signed_url(cached)
+                    audio_id = cached.audio_id
+                else:
+                    asset = self.media_store.save_mp3(generated.data)
+                    media_url = self.media_store.signed_url(asset)
                 await self.cast_controller.play(
                     job.device_id,
                     job.device,
                     media_url,
                     job.title,
                 )
-                self.store.update_status(job.request_id, "succeeded")
+                self.store.update_status(job.request_id, "succeeded", audio_id=audio_id)
                 logger.info(
                     "batch_succeeded request_id=%s batch_name=%s device_id=%s",
                     job.request_id,
@@ -231,4 +290,5 @@ def batch_response_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "batch_name": row["batch_name"],
         "status": row["status"],
         "error": row["error"],
+        "audio_id": row["audio_id"],
     }

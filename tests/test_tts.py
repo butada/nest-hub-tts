@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from nest_hub_tts.config import Settings
-from nest_hub_tts.tts import GeminiTTS, _audio_from_dict, _find_audio
+from nest_hub_tts.tts import GeminiTTS, _audio_filters, _audio_from_dict, _find_audio
 
 
 def test_find_audio_from_interactions_steps() -> None:
@@ -41,6 +41,14 @@ def test_audio_mime_parameters_are_parsed() -> None:
     assert result == (encoded, "audio/l16", 24000, 1)
 
 
+def test_clear_speech_audio_filters_include_speed_and_voice_clarity() -> None:
+    filters = _audio_filters("clear_speech", 1.08)
+    assert filters[0] == "atempo=1.0800"
+    assert "highpass=f=120" in filters
+    assert "equalizer=f=3000:t=q:w=0.8:g=2" in filters
+    assert filters[-1] == "loudnorm=I=-16:LRA=7:TP=-1.0"
+
+
 @pytest.mark.asyncio
 async def test_gemini_tts_reads_mp3_audio_response() -> None:
     encoded = base64.b64encode(b"audio").decode()
@@ -52,9 +60,7 @@ async def test_gemini_tts_reads_mp3_audio_response() -> None:
                 "steps": [
                     {
                         "type": "model_output",
-                        "content": [
-                            {"type": "audio", "data": encoded, "mime_type": "audio/mp3"}
-                        ],
+                        "content": [{"type": "audio", "data": encoded, "mime_type": "audio/mp3"}],
                     }
                 ]
             },
@@ -63,7 +69,13 @@ async def test_gemini_tts_reads_mp3_audio_response() -> None:
     tts = GeminiTTS(Settings(gemini_api_key="test-key"))
     await tts.client.aclose()
     tts.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    result = await tts.synthesize("テスト", "Kore", "自然に")
+    result = await tts.synthesize(
+        "テスト",
+        "Kore",
+        "自然に",
+        audio_profile="natural",
+        audio_speed=1.0,
+    )
     await tts.close()
 
     assert result.data == b"audio"
@@ -94,9 +106,12 @@ async def test_gemini_tts_submits_batch_generate_content_request() -> None:
     assert isinstance(payload, dict)
     request = payload["batch"]["input_config"]["requests"]["requests"][0]["request"]
     assert request["generationConfig"]["responseModalities"] == ["AUDIO"]
-    assert request["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"][
-        "voiceName"
-    ] == "Kore"
+    assert (
+        request["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"][
+            "voiceName"
+        ]
+        == "Kore"
+    )
 
 
 def test_gemini_tts_reads_generate_content_batch_audio() -> None:

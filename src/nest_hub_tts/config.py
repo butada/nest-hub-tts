@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     gemini_tts_style: str = "自然で聞き取りやすく、与えられたテキストを内容を変えずに読み上げる"
     gemini_timeout_seconds: float = 60.0
     gemini_batch_poll_interval_seconds: float = Field(default=10.0, ge=1.0)
+    audio_profile: str = "clear_speech"
+    audio_speed: float = Field(default=1.08, ge=0.5, le=2.0)
     max_text_length: int = Field(default=4000, ge=1)
 
     api_token: str | None = None
@@ -42,6 +44,9 @@ class Settings(BaseSettings):
     media_signing_secret: str = "dev-only-media-secret"
 
     batch_db_path: Path = Path("./data/jobs.sqlite3")
+    audio_cache_dir: Path = Path("./data/audio-cache")
+    audio_cache_ttl_seconds: int = Field(default=2592000, ge=60)
+    audio_url_ttl_seconds: int = Field(default=86400, ge=60)
 
     cast_devices_json: str = "{}"
     cast_timeout_seconds: float = Field(default=10.0, ge=1.0)

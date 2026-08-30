@@ -6,4 +6,6 @@ __pycache__/
 data/media/*
 !data/media/.gitkeep
 data/*.sqlite3
+data/audio-cache/*
+!data/audio-cache/.gitkeep
 *.py[cod]

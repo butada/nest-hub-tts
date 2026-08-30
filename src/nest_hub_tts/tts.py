@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import subprocess
 from dataclasses import dataclass
 from typing import Any
@@ -39,10 +40,19 @@ class GeminiTTS:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def synthesize(self, text: str, voice: str, style: str) -> GeneratedAudio:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str,
+        style: str,
+        audio_profile: str | None = None,
+        audio_speed: float | None = None,
+    ) -> GeneratedAudio:
         if not self.settings.gemini_api_key:
             raise TTSFailure("GEMINI_API_KEY is not configured")
 
+        profile = audio_profile or self.settings.audio_profile
+        speed = self.settings.audio_speed if audio_speed is None else audio_speed
         prompt = _build_prompt(text, style)
         payload = {
             "model": self.settings.gemini_model,
@@ -75,7 +85,7 @@ class GeminiTTS:
         if audio is None:
             raise TTSFailure("Gemini API response did not contain audio data")
 
-        return _audio_tuple_to_mp3(audio)
+        return _audio_tuple_to_mp3(audio, audio_profile=profile, audio_speed=speed)
 
     async def submit_batch(self, request_id: str, text: str, voice: str, style: str) -> str:
         if not self.settings.gemini_api_key:
@@ -193,7 +203,11 @@ class GeminiTTS:
         return str(error)
 
     @staticmethod
-    def audio_from_batch(batch: dict[str, Any]) -> GeneratedAudio:
+    def audio_from_batch(
+        batch: dict[str, Any],
+        audio_profile: str = "natural",
+        audio_speed: float = 1.0,
+    ) -> GeneratedAudio:
         responses = _find_batch_responses(batch)
         if not responses:
             raise BatchFailure("Gemini Batch API response did not contain inline responses")
@@ -208,7 +222,7 @@ class GeminiTTS:
         audio = _find_audio(response)
         if audio is None:
             raise BatchFailure("Gemini Batch API response did not contain audio data")
-        return _audio_tuple_to_mp3(audio)
+        return _audio_tuple_to_mp3(audio, audio_profile=audio_profile, audio_speed=audio_speed)
 
     @staticmethod
     def _error_message(response: httpx.Response) -> str:
@@ -278,6 +292,9 @@ def _build_prompt(text: str, style: str) -> str:
 
 def _audio_tuple_to_mp3(
     audio: tuple[str, str, int | None, int | None],
+    *,
+    audio_profile: str,
+    audio_speed: float,
 ) -> GeneratedAudio:
     raw_data, mime_type, sample_rate, channels = audio
     try:
@@ -285,7 +302,11 @@ def _audio_tuple_to_mp3(
     except (ValueError, TypeError) as exc:
         raise TTSFailure("Gemini audio data was not valid base64") from exc
 
-    if mime_type.lower() in {"audio/mp3", "audio/mpeg"}:
+    if (
+        mime_type.lower() in {"audio/mp3", "audio/mpeg"}
+        and audio_profile == "natural"
+        and math.isclose(audio_speed, 1.0, rel_tol=0.0, abs_tol=0.0001)
+    ):
         return GeneratedAudio(data=decoded, mime_type="audio/mpeg")
 
     return GeneratedAudio(
@@ -294,6 +315,8 @@ def _audio_tuple_to_mp3(
             mime_type=mime_type,
             sample_rate=sample_rate or 24000,
             channels=channels or 1,
+            audio_profile=audio_profile,
+            audio_speed=audio_speed,
         ),
         mime_type="audio/mpeg",
     )
@@ -301,11 +324,11 @@ def _audio_tuple_to_mp3(
 
 def _find_batch_responses(value: dict[str, Any]) -> list[Any] | None:
     candidates: list[Any] = [value]
-    for key in ("response", "output", "dest"):
+    for key in ("response", "output", "dest", "batch"):
         nested = value.get(key)
         if isinstance(nested, dict):
             candidates.append(nested)
-            for nested_key in ("response", "output", "dest"):
+            for nested_key in ("response", "output", "dest", "batch"):
                 deeper = nested.get(nested_key)
                 if isinstance(deeper, dict):
                     candidates.append(deeper)
@@ -344,6 +367,8 @@ def _transcode_to_mp3(
     mime_type: str,
     sample_rate: int,
     channels: int,
+    audio_profile: str,
+    audio_speed: float,
 ) -> bytes:
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     if mime_type.lower() in {"audio/l16", "audio/pcm", "audio/pcm_s16le"}:
@@ -362,9 +387,12 @@ def _transcode_to_mp3(
     else:
         command.extend(["-i", "pipe:0"])
 
+    filters = _audio_filters(audio_profile, audio_speed)
+    command.extend(["-vn"])
+    if filters:
+        command.extend(["-filter:a", ",".join(filters)])
     command.extend(
         [
-            "-vn",
             "-ac",
             "1",
             "-ar",
@@ -394,3 +422,24 @@ def _transcode_to_mp3(
         detail = result.stderr.decode("utf-8", errors="replace")[-500:]
         raise TTSFailure(f"ffmpeg could not convert Gemini audio: {detail}")
     return result.stdout
+
+
+def _audio_filters(audio_profile: str, audio_speed: float) -> list[str]:
+    if audio_profile not in {"natural", "clear_speech"}:
+        raise TTSFailure(f"unsupported AUDIO_PROFILE: {audio_profile}")
+
+    filters: list[str] = []
+    if not math.isclose(audio_speed, 1.0, rel_tol=0.0, abs_tol=0.0001):
+        filters.append(f"atempo={audio_speed:.4f}")
+
+    if audio_profile == "clear_speech":
+        filters.extend(
+            [
+                "highpass=f=120",
+                "equalizer=f=220:t=q:w=1.0:g=-2",
+                "equalizer=f=3000:t=q:w=0.8:g=2",
+                "acompressor=threshold=-18dB:ratio=2.5:attack=5:release=80:makeup=2",
+                "loudnorm=I=-16:LRA=7:TP=-1.0",
+            ]
+        )
+    return filters

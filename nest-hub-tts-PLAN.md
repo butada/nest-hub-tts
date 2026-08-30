@@ -26,6 +26,10 @@ n8nには音声バイナリを返さず、音声生成・一時配信・Google C
 - `POST /v1/speak`
 - `POST /v1/speak`の`execution=batch`による非同期実行
 - `GET /v1/jobs/{request_id}`によるBatchジョブ状態確認
+- TTS結果の永続キャッシュ
+- `replay`による再放送文の付加
+- `GET /v1/audio/{audio_id}.mp3`によるキャッシュMP3取得
+- 速度・低音・明瞭度を調整する音声処理プロファイル
 - JSONによるテキスト入力
 - `gemini-3.1-flash-tts-preview`によるTTS
 - TTS出力のMP3正規化
@@ -66,6 +70,10 @@ n8nには音声バイナリを返さず、音声生成・一時配信・Google C
 - Mac評価時の公開URLは`http://192.168.50.203:<port>`
 - 本番時の公開URLは`http://192.168.50.7:<port>`
 - n8nから本体を呼ぶURLは、Dockerネットワーク内のサービス名またはホスト公開ポートを使う
+- TTSキャッシュはモデル、voice、style、本文、音声処理プロファイル、速度をキーにする
+- キャッシュ済みMP3は他のデバイスでも取得できるよう、Bearer認証APIと期限付き署名URLを提供する
+- `replay=true`時は「これは再放送です。」を本文に付加した完成音声をキャッシュする
+- `clear_speech`プロファイルは低域カット、プレゼンス強調、軽いコンプレッサー、ラウドネス正規化を行う
 
 ## API案
 
@@ -75,6 +83,11 @@ n8nには音声バイナリを返さず、音声生成・一時配信・Google C
 {
   "text": "おはようございます。",
   "device_id": "living-room",
+  "execution": "realtime",
+  "cache": true,
+  "replay": false,
+  "audio_profile": "clear_speech",
+  "audio_speed": 1.08,
   "voice": "Kore",
   "style": "自然で聞き取りやすく話す",
   "title": "お知らせ"
@@ -93,9 +106,16 @@ Batch実行の状態を返す。`submitted`、`running`、`succeeded`、`failed`
 {
   "request_id": "...",
   "device_id": "living-room",
-  "status": "playing"
+  "execution": "realtime",
+  "status": "playing",
+  "cache_hit": false,
+  "tts_generated": true,
+  "audio_id": "...",
+  "audio_url": "http://.../audio/..."
 }
 ```
+
+キャッシュMP3は`GET /v1/audio/{audio_id}.mp3`でBearer認証付き取得ができる。`GET /v1/audio/{audio_id}`で期限付き署名URLを再発行する。
 
 ### `GET /v1/devices`
 
