@@ -1,3 +1,5 @@
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -65,3 +67,23 @@ def test_audio_cache_rejects_invalid_access(tmp_path: Path) -> None:
         cache.get_by_id("0" * 64)
     with pytest.raises(AudioCacheSignatureError):
         cache.resolve_signed("0" * 64, 9999999999, "bad")
+
+
+def test_audio_cache_returns_latest_audio(tmp_path: Path) -> None:
+    cache = AudioCache(tmp_path, "http://localhost:8080", 3600, 3600, "secret")
+    first = cache.save({"text": "最初"}, b"first")
+    second = cache.save({"text": "最新"}, b"second")
+    old = time.time() - 10
+    os.utime(first.path, (old, old))
+
+    latest = cache.latest()
+
+    assert latest == second
+    assert latest is not None
+    assert latest.path.read_bytes() == b"second"
+
+
+def test_audio_cache_latest_is_empty_when_no_audio(tmp_path: Path) -> None:
+    cache = AudioCache(tmp_path, "http://localhost:8080", 3600, 3600, "secret")
+
+    assert cache.latest() is None

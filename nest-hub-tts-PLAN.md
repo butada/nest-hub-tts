@@ -29,6 +29,8 @@ n8nには音声バイナリを返さず、音声生成・一時配信・Google C
 - TTS結果の永続キャッシュ
 - `replay`による再放送文の付加
 - `GET /v1/audio/{audio_id}.mp3`によるキャッシュMP3取得
+- `GET /v1/audio/latest.mp3`による最新キャッシュMP3取得
+- `GET /v1/audio/latest`による最新キャッシュの署名URL発行
 - 速度・低音・明瞭度を調整する音声処理プロファイル
 - JSONによるテキスト入力
 - `gemini-3.1-flash-tts-preview`によるTTS
@@ -116,6 +118,8 @@ Batch実行の状態を返す。`submitted`、`running`、`succeeded`、`failed`
 ```
 
 キャッシュMP3は`GET /v1/audio/{audio_id}.mp3`でBearer認証付き取得ができる。`GET /v1/audio/{audio_id}`で期限付き署名URLを再発行する。
+
+`audio_id`が不明な場合は、キャッシュ全体から最後に生成・更新された音声を`GET /v1/audio/latest.mp3`または`GET /v1/audio/latest`で取得できる。キャッシュはデバイス共通とする。
 
 ### `GET /v1/devices`
 

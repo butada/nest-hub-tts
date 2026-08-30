@@ -84,6 +84,31 @@ class AudioCache:
         path.touch()
         return CachedAudio(audio_id=audio_id, path=path)
 
+    def latest(self) -> CachedAudio | None:
+        """Return the newest non-expired cached audio, or None when empty."""
+        cutoff = time.time() - self.ttl_seconds
+        candidates: list[tuple[float, str]] = []
+        for path in self.root.glob("*.mp3"):
+            audio_id = path.stem
+            if not self._valid_audio_id(audio_id):
+                continue
+            try:
+                modified_at = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if modified_at < cutoff:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            candidates.append((modified_at, audio_id))
+
+        if not candidates:
+            return None
+        _, audio_id = max(candidates)
+        return self.get_by_id(audio_id, missing_ok=True)
+
     def signed_url(self, audio: CachedAudio | str) -> str:
         audio_id = audio.audio_id if isinstance(audio, CachedAudio) else audio
         expires = int(time.time()) + self.url_ttl_seconds

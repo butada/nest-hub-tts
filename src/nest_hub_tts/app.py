@@ -156,6 +156,29 @@ async def cached_audio_public(
 
 
 @app.get(
+    "/v1/audio/latest.mp3",
+    dependencies=[Depends(require_auth)],
+)
+async def latest_cached_audio_api() -> Response:
+    audio = audio_cache.latest()
+    if audio is None:
+        raise HTTPException(status_code=404, detail="No cached audio found")
+    return FileResponse(audio.path, media_type="audio/mpeg", filename=f"{audio.audio_id}.mp3")
+
+
+@app.get(
+    "/v1/audio/latest",
+    response_model=AudioUrlResponse,
+    dependencies=[Depends(require_auth)],
+)
+async def latest_cached_audio_url() -> AudioUrlResponse:
+    audio = audio_cache.latest()
+    if audio is None:
+        raise HTTPException(status_code=404, detail="No cached audio found")
+    return AudioUrlResponse(audio_id=audio.audio_id, audio_url=audio_cache.signed_url(audio))
+
+
+@app.get(
     "/v1/audio/{audio_id}.mp3",
     dependencies=[Depends(require_auth)],
 )

@@ -134,6 +134,27 @@ curl -fS \
   -H 'Authorization: Bearer replace-with-a-long-random-token'
 ```
 
+`audio_id`が分からない場合は、キャッシュ全体から最後に生成・更新されたMP3を取得できます。キャッシュはデバイス共通です。
+
+MP3を直接ダウンロードする場合：
+
+```sh
+curl -fSL \
+  http://127.0.0.1:8080/v1/audio/latest.mp3 \
+  -H 'Authorization: Bearer replace-with-a-long-random-token' \
+  -o latest.mp3
+```
+
+他のデバイスへ渡す署名付きURLを取得する場合：
+
+```sh
+curl -fS \
+  http://127.0.0.1:8080/v1/audio/latest \
+  -H 'Authorization: Bearer replace-with-a-long-random-token'
+```
+
+キャッシュが空、または期限切れの場合は`404`を返します。
+
 ### `GET /v1/devices`
 
 設定済みデバイス一覧を返します。認証を有効にしている場合はBearerトークンが必要です。
