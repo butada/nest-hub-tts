@@ -5,6 +5,8 @@ import json
 import math
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import quote
 
@@ -421,6 +423,59 @@ def _transcode_to_mp3(
     if result.returncode != 0 or not result.stdout:
         detail = result.stderr.decode("utf-8", errors="replace")[-500:]
         raise TTSFailure(f"ffmpeg could not convert Gemini audio: {detail}")
+    return result.stdout
+
+
+def concatenate_mp3(parts: list[bytes]) -> bytes:
+    if not parts or any(not part for part in parts):
+        raise TTSFailure("cannot concatenate empty MP3 audio")
+    if len(parts) == 1:
+        return parts[0]
+
+    with TemporaryDirectory(prefix="nest-hub-tts-") as directory:
+        input_paths: list[Path] = []
+        for index, part in enumerate(parts):
+            path = Path(directory) / f"part-{index}.mp3"
+            path.write_bytes(part)
+            input_paths.append(path)
+
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        for path in input_paths:
+            command.extend(["-i", str(path)])
+        streams = "".join(f"[{index}:a]" for index in range(len(input_paths)))
+        command.extend(
+            [
+                "-filter_complex",
+                f"{streams}concat=n={len(input_paths)}:v=0:a=1[out]",
+                "-map",
+                "[out]",
+                "-ac",
+                "1",
+                "-ar",
+                "24000",
+                "-codec:a",
+                "libmp3lame",
+                "-b:a",
+                "96k",
+                "-f",
+                "mp3",
+                "pipe:1",
+            ]
+        )
+
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise TTSFailure("ffmpeg is required to compose replay audio") from exc
+
+    if result.returncode != 0 or not result.stdout:
+        detail = result.stderr.decode("utf-8", errors="replace")[-500:]
+        raise TTSFailure(f"ffmpeg could not compose replay audio: {detail}")
     return result.stdout
 
 

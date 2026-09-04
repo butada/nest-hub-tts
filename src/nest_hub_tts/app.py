@@ -17,6 +17,7 @@ from .config import get_settings
 from .media import MediaNotFoundError, MediaSignatureError, MediaStore
 from .models import AudioUrlResponse, BatchJobResponse, DeviceResponse, SpeakRequest, SpeakResponse
 from .speech import SpeechSpec
+from .speech_audio import build_replay_audio
 from .tts import BatchFailure, GeminiTTS, TTSFailure
 from .usage_log import UsageLog
 
@@ -354,23 +355,49 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
         return JSONResponse(status_code=202, content=response.model_dump())  # type: ignore[return-value]
 
     media_store.cleanup()
+    audio_id = None
+    audio_url = None
+    tts_request_count = 0
+    component_cache_hits = 0
     try:
-        generated = await tts.synthesize(
-            spec.spoken_text,
-            spec.voice,
-            spec.style,
-            spec.audio_profile,
-            spec.audio_speed,
-        )
-        audio_id = None
-        audio_url = None
+        if payload.cache and spec.is_replay:
+            replay_audio = await build_replay_audio(
+                tts,
+                audio_cache,
+                spec,
+                settings.gemini_model,
+            )
+            generated_data = replay_audio.data
+            tts_request_count = replay_audio.tts_request_count
+            component_cache_hits = int(replay_audio.body_cache_hit) + int(
+                replay_audio.prefix_cache_hit
+            )
+            usage_log.record(
+                "replay_components",
+                request_id=request_id,
+                body_cache_hit=replay_audio.body_cache_hit,
+                prefix_cache_hit=replay_audio.prefix_cache_hit,
+                component_cache_hits=component_cache_hits,
+                tts_request_count=tts_request_count,
+                composed=replay_audio.composed,
+            )
+        else:
+            generated = await tts.synthesize(
+                spec.spoken_text,
+                spec.voice,
+                spec.style,
+                spec.audio_profile,
+                spec.audio_speed,
+            )
+            generated_data = generated.data
+            tts_request_count = 1
         if payload.cache:
-            cached = audio_cache.save(cache_key, generated.data)
+            cached = audio_cache.save(cache_key, generated_data)
             media_url = audio_cache.signed_url(cached)
             audio_id = cached.audio_id
             audio_url = media_url
         else:
-            asset = media_store.save_mp3(generated.data)
+            asset = media_store.save_mp3(generated_data)
             media_url = media_store.signed_url(asset)
         result = await cast_controller.play(
             payload.device_id,
@@ -385,7 +412,9 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
             outcome="failed",
             phase="tts",
             cache_hit=False,
-            tts_generated=False,
+            tts_generated=tts_request_count > 0,
+            tts_request_count=tts_request_count,
+            component_cache_hits=component_cache_hits,
             error_type=type(exc).__name__,
         )
         logger.warning("tts_failed request_id=%s error=%s", request_id, exc)
@@ -396,8 +425,10 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
             request_id=request_id,
             outcome="failed",
             phase="cast_generated_audio",
-            cache_hit=False,
-            tts_generated=True,
+            cache_hit=tts_request_count == 0,
+            tts_generated=tts_request_count > 0,
+            tts_request_count=tts_request_count,
+            component_cache_hits=component_cache_hits,
             audio_id=audio_id,
             error_type=type(exc).__name__,
         )
@@ -416,8 +447,10 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
         request_id=request_id,
         outcome="succeeded",
         phase="cast_generated_audio",
-        cache_hit=False,
-        tts_generated=True,
+        cache_hit=tts_request_count == 0,
+        tts_generated=tts_request_count > 0,
+        tts_request_count=tts_request_count,
+        component_cache_hits=component_cache_hits,
         audio_id=audio_id,
         cast_status=result.status,
     )
@@ -426,8 +459,8 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
         device_id=payload.device_id,
         execution="realtime",
         status=result.status,
-        cache_hit=False,
-        tts_generated=True,
+        cache_hit=tts_request_count == 0,
+        tts_generated=tts_request_count > 0,
         audio_id=audio_id,
         audio_url=audio_url,
     )

@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from .speech import REPLAY_PREFIX, SpeechSpec
+from .speech import SpeechSpec
 
 
 def _sha256(value: str) -> str:
@@ -62,12 +62,7 @@ class UsageLog:
         spec: SpeechSpec,
     ) -> None:
         normalized_text = spec.normalized_text
-        input_has_replay_prefix = normalized_text.startswith(REPLAY_PREFIX)
-        body_text = (
-            normalized_text[len(REPLAY_PREFIX) :].lstrip()
-            if input_has_replay_prefix
-            else normalized_text
-        )
+        body_text = spec.body_text
         self.record(
             "cache_decision",
             request_id=request_id,
@@ -84,7 +79,8 @@ class UsageLog:
             audio_profile=spec.audio_profile,
             audio_speed=spec.audio_speed,
             replay_requested=spec.replay,
-            input_has_replay_prefix=input_has_replay_prefix,
+            replay_detected=spec.is_replay,
+            input_has_replay_prefix=spec.input_has_replay_prefix,
             text_sha256=_sha256(normalized_text),
             body_text_sha256=_sha256(body_text),
             spoken_text_sha256=_sha256(spec.spoken_text),
