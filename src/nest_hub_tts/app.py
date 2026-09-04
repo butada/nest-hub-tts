@@ -18,6 +18,7 @@ from .media import MediaNotFoundError, MediaSignatureError, MediaStore
 from .models import AudioUrlResponse, BatchJobResponse, DeviceResponse, SpeakRequest, SpeakResponse
 from .speech import SpeechSpec
 from .tts import BatchFailure, GeminiTTS, TTSFailure
+from .usage_log import UsageLog
 
 logger = logging.getLogger("nest_hub_tts")
 settings = get_settings()
@@ -37,6 +38,12 @@ audio_cache = AudioCache(
 tts = GeminiTTS(settings)
 cast_controller = CastController(settings)
 batch_store = BatchJobStore(settings.batch_db_path)
+usage_log = UsageLog(
+    settings.usage_log_path,
+    settings.usage_log_max_bytes,
+    settings.usage_log_backup_count,
+    enabled=settings.usage_log_enabled,
+)
 batch_runner = BatchRunner(
     settings,
     tts,
@@ -44,6 +51,7 @@ batch_runner = BatchRunner(
     cast_controller,
     batch_store,
     audio_cache,
+    usage_log,
 )
 bearer = HTTPBearer(auto_error=False)
 
@@ -70,6 +78,7 @@ async def lifespan(_: FastAPI):
     await batch_runner.close()
     await tts.close()
     await cast_controller.close()
+    usage_log.close()
     media_store.cleanup()
     audio_cache.cleanup()
 
@@ -236,6 +245,18 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
     )
     cache_key = spec.cache_key(settings.gemini_model)
     cached = audio_cache.get(cache_key) if payload.cache else None
+    cache_key_id = audio_cache.key_id(cache_key)
+    usage_log.record_cache_decision(
+        request_id=request_id,
+        device_id=payload.device_id,
+        execution=payload.execution,
+        client=request.client.host if request.client else "unknown",
+        cache_enabled=payload.cache,
+        cache_hit=cached is not None,
+        cache_key_id=cache_key_id,
+        model=settings.gemini_model,
+        spec=spec,
+    )
 
     if cached is not None:
         try:
@@ -246,8 +267,27 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
                 payload.title or "Nest Hub TTS",
             )
         except CastFailure as exc:
+            usage_log.record(
+                "speak_result",
+                request_id=request_id,
+                outcome="failed",
+                phase="cast_cached_audio",
+                cache_hit=True,
+                tts_generated=False,
+                error_type=type(exc).__name__,
+            )
             logger.warning("cached_cast_failed request_id=%s error=%s", request_id, exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        usage_log.record(
+            "speak_result",
+            request_id=request_id,
+            outcome="succeeded",
+            phase="cast_cached_audio",
+            cache_hit=True,
+            tts_generated=False,
+            audio_id=cached.audio_id,
+            cast_status=result.status,
+        )
         return SpeakResponse(
             request_id=request_id,
             device_id=payload.device_id,
@@ -274,6 +314,15 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
                 spec.audio_speed,
             )
         except (BatchFailure, TTSFailure) as exc:
+            usage_log.record(
+                "speak_result",
+                request_id=request_id,
+                outcome="failed",
+                phase="batch_submit",
+                cache_hit=False,
+                tts_generated=False,
+                error_type=type(exc).__name__,
+            )
             logger.warning("batch_submit_failed request_id=%s error=%s", request_id, exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -292,6 +341,15 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
             batch_name=batch_name,
             cache_hit=False,
             tts_generated=None,
+        )
+        usage_log.record(
+            "speak_accepted",
+            request_id=request_id,
+            outcome="accepted",
+            phase="batch_submit",
+            cache_hit=False,
+            tts_generated=None,
+            batch_name=batch_name,
         )
         return JSONResponse(status_code=202, content=response.model_dump())  # type: ignore[return-value]
 
@@ -321,9 +379,28 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
             payload.title or "Nest Hub TTS",
         )
     except TTSFailure as exc:
+        usage_log.record(
+            "speak_result",
+            request_id=request_id,
+            outcome="failed",
+            phase="tts",
+            cache_hit=False,
+            tts_generated=False,
+            error_type=type(exc).__name__,
+        )
         logger.warning("tts_failed request_id=%s error=%s", request_id, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except CastFailure as exc:
+        usage_log.record(
+            "speak_result",
+            request_id=request_id,
+            outcome="failed",
+            phase="cast_generated_audio",
+            cache_hit=False,
+            tts_generated=True,
+            audio_id=audio_id,
+            error_type=type(exc).__name__,
+        )
         logger.warning("cast_failed request_id=%s error=%s", request_id, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -333,6 +410,16 @@ async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
         payload.device_id,
         result.status,
         request.client.host if request.client else "unknown",
+    )
+    usage_log.record(
+        "speak_result",
+        request_id=request_id,
+        outcome="succeeded",
+        phase="cast_generated_audio",
+        cache_hit=False,
+        tts_generated=True,
+        audio_id=audio_id,
+        cast_status=result.status,
     )
     return SpeakResponse(
         request_id=request_id,

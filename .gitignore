@@ -8,4 +8,6 @@ data/media/*
 data/*.sqlite3
 data/audio-cache/*
 !data/audio-cache/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
 *.py[cod]

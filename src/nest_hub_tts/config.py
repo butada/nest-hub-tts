@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     audio_cache_ttl_seconds: int = Field(default=2592000, ge=60)
     audio_url_ttl_seconds: int = Field(default=86400, ge=60)
 
+    usage_log_enabled: bool = True
+    usage_log_path: Path = Path("./data/logs/usage.jsonl")
+    usage_log_max_bytes: int = Field(default=10485760, ge=1024)
+    usage_log_backup_count: int = Field(default=12, ge=1)
+
     cast_devices_json: str = "{}"
     cast_timeout_seconds: float = Field(default=10.0, ge=1.0)
 
@@ -62,8 +67,7 @@ class Settings(BaseSettings):
             raise ValueError("CAST_DEVICES_JSON must be a JSON object")
 
         return {
-            device_id: DeviceSettings.model_validate(device)
-            for device_id, device in raw.items()
+            device_id: DeviceSettings.model_validate(device) for device_id, device in raw.items()
         }
 
 

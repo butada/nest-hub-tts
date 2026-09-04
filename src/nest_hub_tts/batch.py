@@ -13,6 +13,7 @@ from .cast import CastController, CastFailure
 from .config import DeviceSettings, Settings
 from .media import MediaStore
 from .tts import BatchFailure, GeminiTTS, TTSFailure
+from .usage_log import UsageLog
 
 logger = logging.getLogger("nest_hub_tts.batch")
 
@@ -169,6 +170,7 @@ class BatchRunner:
         cast_controller: CastController,
         store: BatchJobStore,
         audio_cache: AudioCache,
+        usage_log: UsageLog,
     ) -> None:
         self.settings = settings
         self.tts = tts
@@ -176,6 +178,7 @@ class BatchRunner:
         self.cast_controller = cast_controller
         self.store = store
         self.audio_cache = audio_cache
+        self.usage_log = usage_log
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
@@ -257,6 +260,15 @@ class BatchRunner:
                     job.title,
                 )
                 self.store.update_status(job.request_id, "succeeded", audio_id=audio_id)
+                self.usage_log.record(
+                    "speak_result",
+                    request_id=job.request_id,
+                    outcome="succeeded",
+                    phase="batch_complete",
+                    cache_hit=False,
+                    tts_generated=True,
+                    audio_id=audio_id,
+                )
                 logger.info(
                     "batch_succeeded request_id=%s batch_name=%s device_id=%s",
                     job.request_id,
@@ -266,6 +278,15 @@ class BatchRunner:
                 return
         except (BatchFailure, TTSFailure, CastFailure) as exc:
             self.store.update_status(job.request_id, "failed", str(exc))
+            self.usage_log.record(
+                "speak_result",
+                request_id=job.request_id,
+                outcome="failed",
+                phase="batch_complete",
+                cache_hit=False,
+                tts_generated=not isinstance(exc, (BatchFailure, TTSFailure)),
+                error_type=type(exc).__name__,
+            )
             logger.warning(
                 "batch_failed request_id=%s batch_name=%s error=%s",
                 job.request_id,
@@ -276,6 +297,15 @@ class BatchRunner:
             raise
         except Exception as exc:
             self.store.update_status(job.request_id, "failed", str(exc))
+            self.usage_log.record(
+                "speak_result",
+                request_id=job.request_id,
+                outcome="failed",
+                phase="batch_complete",
+                cache_hit=False,
+                tts_generated=None,
+                error_type=type(exc).__name__,
+            )
             logger.exception(
                 "batch_unexpected_error request_id=%s batch_name=%s",
                 job.request_id,

@@ -8,6 +8,7 @@ services:
       MEDIA_DIR: /data/media
       BATCH_DB_PATH: /data/jobs.sqlite3
       AUDIO_CACHE_DIR: /data/audio-cache
+      USAGE_LOG_PATH: /data/logs/usage.jsonl
       MEDIA_PUBLIC_BASE_URL: http://192.168.50.7:8080
     ports:
       - "8080:8080"

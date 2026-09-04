@@ -16,7 +16,7 @@ COPY src ./src
 
 RUN uv sync --frozen --no-dev
 
-RUN mkdir -p /data/media
+RUN mkdir -p /data/media /data/audio-cache /data/logs
 EXPOSE 8080
 
 CMD ["uv", "run", "uvicorn", "nest_hub_tts.app:app", "--host", "0.0.0.0", "--port", "8080"]

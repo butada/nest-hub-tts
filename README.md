@@ -62,7 +62,7 @@ curl -X POST http://127.0.0.1:8080/v1/speak \
 
 `cache`を`false`にすると、そのリクエストだけキャッシュを使わず、生成音声も保存しません。
 
-`replay`を`true`にすると、本文の前に「これは再放送です。」を付けた完成音声を生成・キャッシュします。同じ本文の再放送は、保存済みMP3をそのまま再利用します。
+`replay`を`true`にすると、本文の前に「これは再放送です。」を付けた完成音声を生成・キャッシュします。同じ本文の再放送は、保存済みMP3をそのまま再利用します。通常放送と再放送は完成音声が異なるため、現時点では別々のキャッシュです。
 
 レスポンスには`audio_id`と`audio_url`が含まれます。`audio_url`は他のデバイスでの再生に、`audio_id`はBearer認証付きMP3取得APIに使います。キャッシュが見つかった場合は`cache_hit: true`となり、`execution: batch`を指定していてもBatchジョブを作らず即時再生します。
 
@@ -163,6 +163,22 @@ curl -fS \
 
 認証なしの死活確認です。
 
+## 利用分析ログ
+
+キャッシュ効果の分析用に、`USAGE_LOG_PATH`へJSON Lines形式のログを保存します。デフォルトは`./data/logs/usage.jsonl`です。
+
+発話ごとに`cache_decision`イベントを1行記録し、次の情報を確認できます。
+
+- キャッシュの有効・無効、ヒット・ミス
+- 実際のキャッシュID
+- モデル、voice、styleのハッシュ、音声プロファイル、速度
+- 全文、発話本文、再放送接頭辞を除いた本文のSHA-256と文字数
+- APIの`replay`指定と、入力本文に再放送接頭辞が含まれていたか
+
+本文そのもの、styleの内容、APIトークンは記録しません。`speak_result`イベントにはTTS生成の有無、成功・失敗、処理段階を記録します。
+
+ログは`USAGE_LOG_MAX_BYTES`でローテーションし、`USAGE_LOG_BACKUP_COUNT`世代を保持します。Dockerではログを残すため、`USAGE_LOG_PATH=/data/logs/usage.jsonl`を設定し、`/data`を永続ボリュームへマウントしてください。
+
 ## n8n
 
 n8nからはJSONだけを送ります。Mac評価時は`http://192.168.50.203:8080/v1/speak`、本番Dockerでは同一Dockerネットワークのサービス名または公開ポートの`http://192.168.50.7:8005/v1/speak`を使います。
@@ -177,7 +193,7 @@ cp .env.example .env
 docker compose -f docker-compose.example.yml up -d --build
 ```
 
-n8nからDocker内部で呼ぶ場合は、Composeサービス名が使える構成に合わせてください。キャッシュとBatchジョブ状態を残すため、`./data`をコンテナの`/data`へマウントします。
+n8nからDocker内部で呼ぶ場合は、Composeサービス名が使える構成に合わせてください。キャッシュ、Batchジョブ状態、利用分析ログを残すため、`./data`をコンテナの`/data`へマウントします。
 
 ## 注意
 
